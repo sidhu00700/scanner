@@ -11,6 +11,7 @@ from datetime import datetime
 import json
 import os
 import re
+import uuid
 
 
 app = Flask(__name__)
@@ -162,7 +163,9 @@ def analyze_cookies(response):
             "title": "Cookie Security",
             "severity": "INFO",
             "status": "INFO",
-            "description": "No Set-Cookie header was observed.",
+            "description": (
+                "No Set-Cookie header was observed."
+            ),
             "why": (
                 "No cookie attributes could be reviewed from "
                 "the response."
@@ -191,9 +194,6 @@ def analyze_cookies(response):
     if not has_samesite:
         missing.append("SameSite")
 
-    # IMPORTANT:
-    # We call this a configuration warning rather than claiming
-    # a confirmed exploitable vulnerability.
     if len(missing) >= 2:
         status = "FAIL"
         severity = "MEDIUM"
@@ -263,7 +263,6 @@ def analyze_cors(response):
     )
 
     if not cors:
-
         return {
             "name": "CORS Policy",
             "title": "Cross-Origin Resource Sharing",
@@ -286,7 +285,6 @@ def analyze_cors(response):
         }
 
     if cors.strip() == "*":
-
         return {
             "name": "CORS Policy",
             "title": "Cross-Origin Resource Sharing",
@@ -339,13 +337,11 @@ def analyze_cors(response):
 def analyze_server(server_value):
 
     if not server_value:
-
         return {
             "name": "Server Information Disclosure",
             "title": "Server Header",
             "severity": "INFO",
             "status": "PASS",
-            "leak": False,
             "description": (
                 "The Server response header was not exposed."
             ),
@@ -377,13 +373,11 @@ def analyze_server(server_value):
     )
 
     if leak:
-
         return {
             "name": "Server Information Disclosure",
             "title": "Server Header",
             "severity": "LOW",
             "status": "WARNING",
-            "leak": True,
             "description": (
                 "The Server header appears to reveal "
                 "recognizable software or version information."
@@ -406,7 +400,6 @@ def analyze_server(server_value):
         "title": "Server Header",
         "severity": "INFO",
         "status": "PASS",
-        "leak": False,
         "description": (
             "A Server header is present, but obvious version "
             "disclosure was not detected."
@@ -423,6 +416,117 @@ def analyze_server(server_value):
             "implementation details."
         ),
     }
+
+
+# =========================================================
+# TLS CHECK
+# =========================================================
+
+def check_tls_certificate(url):
+
+    parsed = urlparse(url)
+
+    if not parsed.hostname:
+        return {
+            "status": "INFO",
+            "severity": "INFO",
+            "description": (
+                "Hostname could not be determined."
+            ),
+            "evidence": "No valid hostname found.",
+        }
+
+    if parsed.scheme != "https":
+        return {
+            "status": "FAIL",
+            "severity": "HIGH",
+            "description": (
+                "The target is not using HTTPS."
+            ),
+            "evidence": f"URL: {url}",
+        }
+
+    try:
+
+        import ssl
+        import socket
+
+        context = ssl.create_default_context()
+
+        with socket.create_connection(
+            (parsed.hostname, 443),
+            timeout=8
+        ) as sock:
+
+            with context.wrap_socket(
+                sock,
+                server_hostname=parsed.hostname
+            ) as secure_sock:
+
+                certificate = (
+                    secure_sock.getpeercert()
+                )
+
+                expires = certificate.get(
+                    "notAfter",
+                    "Unknown"
+                )
+
+                return {
+                    "status": "PASS",
+                    "severity": "INFO",
+                    "description": (
+                        "TLS certificate was successfully inspected."
+                    ),
+                    "evidence": (
+                        f"Certificate expires: {expires}"
+                    ),
+                }
+
+    except Exception as error:
+
+        return {
+            "status": "WARNING",
+            "severity": "MEDIUM",
+            "description": (
+                "The TLS certificate could not be fully inspected."
+            ),
+            "evidence": str(error),
+        }
+
+
+# =========================================================
+# DNS CHECK
+# =========================================================
+
+def check_dns(url):
+
+    parsed = urlparse(url)
+
+    hostname = parsed.hostname
+
+    if not hostname:
+        return None
+
+    try:
+
+        import socket
+
+        result = socket.gethostbyname_ex(
+            hostname
+        )
+
+        return {
+            "hostname": hostname,
+            "addresses": result[2],
+        }
+
+    except Exception as error:
+
+        return {
+            "hostname": hostname,
+            "error": str(error),
+        }
 
 
 # =========================================================
@@ -450,7 +554,7 @@ def audit_website(url):
             allow_redirects=True,
             headers={
                 "User-Agent": (
-                    "AhmedSidhu-SecurityAuditor/2.0"
+                    "AhmedSidhu-SecurityAuditor/2.1"
                 )
             },
         )
@@ -464,15 +568,25 @@ def audit_website(url):
         # -------------------------------------------------
 
         https_ok = (
-            response.url.lower().startswith("https://")
+            response.url.lower().startswith(
+                "https://"
+            )
         )
 
         findings.append({
             "id": "https",
             "name": "HTTPS / SSL",
             "title": "Encrypted Connection",
-            "severity": "HIGH" if not https_ok else "INFO",
-            "status": "PASS" if https_ok else "FAIL",
+            "severity": (
+                "HIGH"
+                if not https_ok
+                else "INFO"
+            ),
+            "status": (
+                "PASS"
+                if https_ok
+                else "FAIL"
+            ),
             "description": (
                 "Checks whether the final connection uses HTTPS."
             ),
@@ -494,10 +608,16 @@ def audit_website(url):
 
         for item in SECURITY_HEADERS:
 
-            present = item["name"] in headers
+            present = (
+                item["name"] in headers
+            )
 
             findings.append({
-                "id": item["name"].lower().replace("-", "_"),
+                "id": (
+                    item["name"]
+                    .lower()
+                    .replace("-", "_")
+                ),
                 "name": item["name"],
                 "title": item["title"],
                 "severity": (
@@ -536,27 +656,31 @@ def audit_website(url):
         # COOKIES
         # -------------------------------------------------
 
+        cookie_finding = analyze_cookies(
+            response
+        )
+
         findings.append({
             "id": "cookies",
-            **analyze_cookies(response),
+            **cookie_finding,
         })
 
         # -------------------------------------------------
         # CORS
         # -------------------------------------------------
 
+        cors_finding = analyze_cors(
+            response
+        )
+
         findings.append({
             "id": "cors",
-            **analyze_cors(response),
+            **cors_finding,
         })
 
         # -------------------------------------------------
-        # FULL-SCAN ADDITIONAL HEADERS
+        # REFERRER POLICY
         # -------------------------------------------------
-
-        # These are useful informational checks.
-        # They do not turn the entire website into a vulnerability
-        # simply because they are absent.
 
         referrer_policy = headers.get(
             "Referrer-Policy"
@@ -571,8 +695,8 @@ def audit_website(url):
                 "severity": "INFO",
                 "status": "PASS",
                 "description": (
-                    "Controls how much referrer information is "
-                    "shared with other origins."
+                    "Controls how much referrer information "
+                    "is shared with other origins."
                 ),
                 "why": (
                     "A suitable Referrer-Policy can reduce "
@@ -586,6 +710,10 @@ def audit_website(url):
                     "permissive behavior required by the site."
                 ),
             })
+
+        # -------------------------------------------------
+        # PERMISSIONS POLICY
+        # -------------------------------------------------
 
         permissions_policy = headers.get(
             "Permissions-Policy"
@@ -616,6 +744,120 @@ def audit_website(url):
             })
 
         # -------------------------------------------------
+        # TLS
+        # -------------------------------------------------
+
+        tls_result = check_tls_certificate(
+            response.url
+        )
+
+        findings.append({
+            "id": "tls_certificate",
+            "name": "TLS Certificate",
+            "title": "TLS Certificate",
+            "severity": tls_result.get(
+                "severity",
+                "INFO"
+            ),
+            "status": tls_result.get(
+                "status",
+                "INFO"
+            ),
+            "description": tls_result.get(
+                "description",
+                ""
+            ),
+            "why": (
+                "A properly configured TLS certificate helps "
+                "establish a trusted HTTPS connection."
+            ),
+            "evidence": tls_result.get(
+                "evidence",
+                "No evidence"
+            ),
+            "fix": (
+                "Use a valid, trusted and properly configured "
+                "TLS certificate."
+            ),
+        })
+
+        # -------------------------------------------------
+        # DNS
+        # -------------------------------------------------
+
+        dns_result = check_dns(
+            response.url
+        )
+
+        if dns_result:
+
+            findings.append({
+                "id": "dns_information",
+                "name": "DNS Information",
+                "title": "DNS / Host Resolution",
+                "severity": "INFO",
+                "status": "INFO",
+                "description": (
+                    "Shows public host addresses resolved "
+                    "by the scanner."
+                ),
+                "why": (
+                    "This provides informational visibility "
+                    "into the target's public network footprint."
+                ),
+                "evidence": json.dumps(
+                    dns_result,
+                    indent=2
+                ),
+                "fix": (
+                    "No action is required based only on "
+                    "this informational result."
+                ),
+            })
+
+        # -------------------------------------------------
+        # REDIRECT CHAIN
+        # -------------------------------------------------
+
+        redirect_chain = []
+
+        for item in response.history:
+
+            redirect_chain.append({
+                "status": item.status_code,
+                "url": item.url,
+                "location": item.headers.get(
+                    "Location"
+                ),
+            })
+
+        if redirect_chain:
+
+            findings.append({
+                "id": "redirect_chain",
+                "name": "Redirect Chain",
+                "title": "HTTP Redirects",
+                "severity": "INFO",
+                "status": "INFO",
+                "description": (
+                    "Shows redirects followed before reaching "
+                    "the final target."
+                ),
+                "why": (
+                    "Redirect visibility helps understand the "
+                    "target's connection flow."
+                ),
+                "evidence": json.dumps(
+                    redirect_chain,
+                    indent=2
+                ),
+                "fix": (
+                    "Review redirects and remove unnecessary "
+                    "or unexpected redirect hops."
+                ),
+            })
+
+        # -------------------------------------------------
         # COUNTERS
         # -------------------------------------------------
 
@@ -625,47 +867,74 @@ def audit_website(url):
 
         passed_count = 0
         failed_count = 0
+        warning_count = 0
+        info_count = 0
 
         for finding in findings:
 
-            if finding["status"] == "PASS":
+            status = finding.get(
+                "status",
+                "INFO"
+            )
+
+            severity = finding.get(
+                "severity",
+                "INFO"
+            )
+
+            if status == "PASS":
                 passed_count += 1
-            elif finding["status"] in (
-                "FAIL",
-                "WARNING"
-            ):
+
+            elif status == "FAIL":
                 failed_count += 1
 
-            if finding["status"] in (
+            elif status == "WARNING":
+                warning_count += 1
+
+            else:
+                info_count += 1
+
+            if status in (
                 "FAIL",
                 "WARNING"
             ):
 
-                if finding["severity"] == "HIGH":
+                if severity == "HIGH":
                     high_count += 1
 
-                elif finding["severity"] == "MEDIUM":
+                elif severity == "MEDIUM":
                     medium_count += 1
 
-                elif finding["severity"] == "LOW":
+                elif severity == "LOW":
                     low_count += 1
 
         total = len(findings)
 
+        # Score counts PASS as successful,
+        # while INFO findings are not treated as failures.
+        positive_count = (
+            passed_count + info_count
+        )
+
         score = round(
-            (passed_count / total) * 100
+            (
+                positive_count / total
+            ) * 100
         ) if total else 0
 
         # -------------------------------------------------
-        # RISK LEVEL
+        # RISK
         # -------------------------------------------------
 
         if high_count > 0:
             risk_level = "HIGH"
+
         elif medium_count > 0:
             risk_level = "MEDIUM"
+
         elif low_count > 0:
             risk_level = "LOW"
+
         else:
             risk_level = "LOW"
 
@@ -687,7 +956,8 @@ def audit_website(url):
             ),
             "duration": round(
                 (
-                    datetime.now() - start_time
+                    datetime.now()
+                    - start_time
                 ).total_seconds(),
                 2,
             ),
@@ -698,6 +968,8 @@ def audit_website(url):
             "total": total,
             "passed": passed_count,
             "failed": failed_count,
+            "warnings": warning_count,
+            "info": info_count,
             "high": high_count,
             "medium": medium_count,
             "low": low_count,
@@ -705,7 +977,7 @@ def audit_website(url):
         }
 
         # -------------------------------------------------
-        # HISTORY
+        # SAVE HISTORY
         # -------------------------------------------------
 
         history = load_json(
@@ -713,14 +985,22 @@ def audit_website(url):
             []
         )
 
+        scan_id = uuid.uuid4().hex[:10]
+
+        results["scan_id"] = scan_id
+
         history.insert(
             0,
             {
+                "id": scan_id,
                 "target": response.url,
                 "time": results["scan_time"],
                 "score": score,
                 "status": overall,
                 "risk": risk_level,
+                "passed": passed_count,
+                "failed": failed_count,
+                "warnings": warning_count,
             },
         )
 
@@ -770,7 +1050,7 @@ def audit_website(url):
 
 
 # =========================================================
-# MAIN DASHBOARD
+# DASHBOARD
 # =========================================================
 
 DASHBOARD_HTML = r"""
@@ -794,10 +1074,8 @@ DASHBOARD_HTML = r"""
 
     --bg:#050b16;
     --panel:#0b1424;
-    --panel2:#0e192b;
     --border:#193452;
     --blue:#1677f8;
-    --cyan:#3db8ff;
     --text:#eef7ff;
     --muted:#8497af;
     --green:#14d99a;
@@ -820,11 +1098,6 @@ body{
         circle at 85% 0%,
         rgba(24,119,248,.12),
         transparent 30%
-    ),
-    radial-gradient(
-        circle at 10% 100%,
-        rgba(61,184,255,.05),
-        transparent 28%
     ),
     var(--bg);
 
@@ -891,7 +1164,6 @@ input{
 .brand-title{
 
     font-size:16px;
-
     font-weight:900;
 }
 
@@ -909,9 +1181,7 @@ input{
 .top-actions{
 
     display:flex;
-
     align-items:center;
-
     gap:15px;
 }
 
@@ -922,8 +1192,6 @@ input{
     font-size:10px;
 
     font-weight:900;
-
-    white-space:nowrap;
 }
 
 .contact-btn{
@@ -948,10 +1216,7 @@ input{
 }
 
 .contact-btn:hover{
-
     background:#12345a;
-
-    border-color:#3f98da;
 }
 
 .wrap{
@@ -964,7 +1229,6 @@ input{
 }
 
 .hero{
-
     margin-bottom:20px;
 }
 
@@ -973,8 +1237,6 @@ input{
     margin:0 0 7px;
 
     font-size:31px;
-
-    letter-spacing:-.5px;
 }
 
 .hero p{
@@ -1020,15 +1282,6 @@ input{
     border-radius:8px;
 
     outline:none;
-
-    font-size:13px;
-}
-
-.search input:focus{
-
-    border-color:#3196ff;
-
-    box-shadow:0 0 0 3px rgba(22,119,248,.12);
 }
 
 .scan-btn{
@@ -1041,7 +1294,7 @@ input{
 
     border-radius:8px;
 
-    background:#1677f8;
+    background:var(--blue);
 
     color:white;
 
@@ -1050,18 +1303,6 @@ input{
     font-weight:900;
 
     cursor:pointer;
-}
-
-.scan-btn:hover{
-
-    background:#0b67dc;
-}
-
-.scan-btn:disabled{
-
-    opacity:.65;
-
-    cursor:not-allowed;
 }
 
 .error{
@@ -1096,21 +1337,6 @@ input{
     border-radius:12px;
 }
 
-.progress-top{
-
-    display:flex;
-
-    justify-content:space-between;
-
-    margin-bottom:9px;
-
-    color:#b8cce0;
-
-    font-size:11px;
-
-    font-weight:700;
-}
-
 .progress-track{
 
     height:7px;
@@ -1124,12 +1350,11 @@ input{
 
 .progress-bar{
 
-    width:0%;
+    width:0;
 
     height:100%;
 
-    background:
-    linear-gradient(
+    background:linear-gradient(
         90deg,
         #1573ff,
         #35c2ff
@@ -1138,18 +1363,9 @@ input{
     transition:width .5s ease;
 }
 
-.progress-text{
-
-    margin-top:9px;
-
-    color:#7890aa;
-
-    font-size:10px;
-}
-
 .live-feed{
 
-    margin-top:12px;
+    margin-top:10px;
 
     padding:10px;
 
@@ -1166,8 +1382,6 @@ input{
     font-size:10px;
 
     line-height:1.8;
-
-    min-height:70px;
 }
 
 .stats{
@@ -1346,8 +1560,6 @@ input{
 
     background:#146fe2;
 
-    border-color:#2d91ff;
-
     color:white;
 }
 
@@ -1380,11 +1592,6 @@ input{
     border-bottom:1px solid #162f49;
 }
 
-.finding:last-child{
-
-    border-bottom:0;
-}
-
 .number{
 
     color:#5e7893;
@@ -1406,8 +1613,6 @@ input{
     color:#7389a1;
 
     font-size:9px;
-
-    line-height:1.4;
 }
 
 .badge{
@@ -1423,15 +1628,6 @@ input{
     font-size:8px;
 
     font-weight:900;
-
-    letter-spacing:.4px;
-}
-
-.medium{
-
-    background:#392d0d;
-
-    color:#f4c456;
 }
 
 .high{
@@ -1439,6 +1635,13 @@ input{
     background:#41101b;
 
     color:#ff7188;
+}
+
+.medium{
+
+    background:#392d0d;
+
+    color:#f4c456;
 }
 
 .low{
@@ -1484,13 +1687,6 @@ input{
     cursor:pointer;
 
     font-size:9px;
-
-    font-weight:800;
-}
-
-.details-btn:hover{
-
-    background:#10365c;
 }
 
 .detail-panel{
@@ -1561,8 +1757,6 @@ input{
     margin-bottom:6px;
 
     font-size:10px;
-
-    color:#ecf6ff;
 }
 
 .detail-section p{
@@ -1591,8 +1785,6 @@ input{
     font-family:Consolas,monospace;
 
     font-size:9px;
-
-    line-height:1.6;
 
     word-break:break-word;
 }
@@ -1639,16 +1831,9 @@ input{
 
 .action.primary{
 
-    background:#1677f8;
-
-    border-color:#2b93ff;
+    background:var(--blue);
 
     color:white;
-}
-
-.action:hover{
-
-    filter:brightness(1.1);
 }
 
 .feedback{
@@ -1708,27 +1893,6 @@ input{
     font-size:10px;
 }
 
-.feedback button{
-
-    height:35px;
-
-    padding:0 11px;
-
-    border-radius:7px;
-
-    border:1px solid #2b5d92;
-
-    background:#0d3965;
-
-    color:#d2ecff;
-
-    font-size:9px;
-
-    font-weight:800;
-
-    cursor:pointer;
-}
-
 .footer{
 
     display:flex;
@@ -1772,8 +1936,6 @@ input{
     object-fit:cover;
 
     border:2px solid #35aaff;
-
-    box-shadow:0 0 16px rgba(53,170,255,.18);
 }
 
 .modal{
@@ -1790,7 +1952,7 @@ input{
 
     justify-content:center;
 
-    background:rgba(0,7,16,.80);
+    background:rgba(0,7,16,.8);
 
     backdrop-filter:blur(8px);
 }
@@ -1805,19 +1967,12 @@ input{
 
     padding:31px;
 
-    background:
-    linear-gradient(
-        145deg,
-        #0d1a2c,
-        #07111f
-    );
+    background:#0d1a2c;
 
     border:1px solid #285174;
 
     border-radius:19px;
 
-    box-shadow:
-    0 30px 90px rgba(0,0,0,.55);
 }
 
 .modal-close{
@@ -1828,10 +1983,6 @@ input{
 
     right:14px;
 
-    width:30px;
-
-    height:30px;
-
     border:0;
 
     background:transparent;
@@ -1839,8 +1990,6 @@ input{
     color:#8096ad;
 
     font-size:25px;
-
-    line-height:1;
 
     cursor:pointer;
 }
@@ -1857,16 +2006,12 @@ input{
 
     border:3px solid #39aeff;
 
-    box-shadow:
-    0 0 25px rgba(57,174,255,.25);
-
     margin-bottom:15px;
 }
 
 .modal-box h2{
 
     margin:0;
-
     font-size:22px;
 }
 
@@ -1879,10 +2024,6 @@ input{
     font-size:10px;
 
     font-weight:900;
-
-    letter-spacing:.8px;
-
-    text-transform:uppercase;
 }
 
 .contact-text{
@@ -1898,10 +2039,6 @@ input{
 
     display:inline-flex;
 
-    align-items:center;
-
-    justify-content:center;
-
     margin-top:16px;
 
     padding:11px 17px;
@@ -1910,18 +2047,13 @@ input{
 
     color:white;
 
-    background:#1677f8;
+    background:var(--blue);
 
     text-decoration:none;
 
     font-size:10px;
 
     font-weight:900;
-}
-
-.email-button:hover{
-
-    background:#0d68df;
 }
 
 .email-address{
@@ -1936,18 +2068,14 @@ input{
 @media(max-width:1150px){
 
     .stats{
-
-        grid-template-columns:
-        1fr 1fr 1fr;
+        grid-template-columns:1fr 1fr 1fr;
     }
 
     .dashboard{
-
         grid-template-columns:1fr;
     }
 
     .detail-panel{
-
         position:static;
     }
 }
@@ -1955,7 +2083,6 @@ input{
 @media(max-width:850px){
 
     .finding{
-
         grid-template-columns:
         25px
         1fr
@@ -1963,12 +2090,10 @@ input{
     }
 
     .finding > :nth-child(4){
-
         display:none;
     }
 
     .finding > :nth-child(5){
-
         justify-self:end;
     }
 }
@@ -1976,56 +2101,40 @@ input{
 @media(max-width:650px){
 
     .topbar{
-
         padding:0 14px;
     }
 
-    .top-actions{
-
-        gap:8px;
-    }
-
     .ready{
-
         display:none;
     }
 
     .wrap{
-
         padding:20px 12px 35px;
     }
 
     .search{
-
         flex-direction:column;
     }
 
     .stats{
-
         grid-template-columns:1fr;
     }
 
     .title-row{
-
-        align-items:stretch;
-
         flex-direction:column;
+        align-items:stretch;
     }
 
     .search-findings{
-
         width:100%;
     }
 
     .feedback-row{
-
         flex-direction:column;
     }
 
     .footer{
-
         flex-direction:column;
-
         align-items:flex-start;
     }
 }
@@ -2036,10 +2145,6 @@ input{
 
 <body>
 
-
-<!-- =====================================================
-     TOP BAR
-====================================================== -->
 
 <header class="topbar">
 
@@ -2085,10 +2190,6 @@ Contact Us
 <main class="wrap">
 
 
-<!-- =====================================================
-     HERO
-====================================================== -->
-
 <section class="hero">
 
 <h1>
@@ -2102,10 +2203,6 @@ server-configuration issues.
 
 </section>
 
-
-<!-- =====================================================
-     SEARCH
-====================================================== -->
 
 <form
     method="POST"
@@ -2132,19 +2229,22 @@ server-configuration issues.
 </form>
 
 
-<!-- =====================================================
-     PROGRESS
-====================================================== -->
-
 <div
     class="progress-box"
     id="progressBox"
 >
 
-<div class="progress-top">
+<div
+    style="
+        display:flex;
+        justify-content:space-between;
+        margin-bottom:8px;
+        font-size:10px;
+    "
+>
 
 <span id="progressStatus">
-Preparing assessment...
+Preparing...
 </span>
 
 <span id="progressPercent">
@@ -2163,25 +2263,14 @@ Preparing assessment...
 </div>
 
 <div
-    class="progress-text"
-    id="progressText"
->
-Initializing...
-</div>
-
-<div
-    class="live-feed"
     id="liveFeed"
+    class="live-feed"
 >
 [+] Initializing security assessment...
 </div>
 
 </div>
 
-
-<!-- =====================================================
-     ERROR
-====================================================== -->
 
 {% if error %}
 
@@ -2194,10 +2283,6 @@ Initializing...
 
 {% if results %}
 
-
-<!-- =====================================================
-     STATS
-====================================================== -->
 
 <section class="stats">
 
@@ -2236,7 +2321,9 @@ red
 </div>
 
 <div class="small">
-{{ results.passed }} passed / {{ results.failed }} findings
+{{ results.passed }} Passed •
+{{ results.failed }} Failed •
+{{ results.warnings }} Warning
 </div>
 
 </div>
@@ -2284,17 +2371,11 @@ Low Risk
 </section>
 
 
-<!-- =====================================================
-     MAIN DASHBOARD
-====================================================== -->
-
 <section class="dashboard">
 
 
 <div>
 
-
-<!-- FINDINGS -->
 
 <div class="findings-card">
 
@@ -2314,8 +2395,6 @@ Security Findings ({{ results.total }})
 
 </div>
 
-
-<!-- FILTERS -->
 
 <div class="filters">
 
@@ -2372,7 +2451,6 @@ Low
 
 
 <div class="table">
-
 
 {% for finding in results.findings %}
 
@@ -2457,13 +2535,10 @@ View Details →
 
 {% endfor %}
 
-
 </div>
 
 </div>
 
-
-<!-- ACTIONS -->
 
 <div class="actions">
 
@@ -2484,6 +2559,14 @@ Download Report
 
 <a
     class="action"
+    href="/history"
+    target="_blank"
+>
+Scan History
+</a>
+
+<a
+    class="action"
     href="/"
 >
 New Scan
@@ -2499,8 +2582,6 @@ Copy Link
 
 </div>
 
-
-<!-- FEEDBACK -->
 
 <div class="feedback">
 
@@ -2542,13 +2623,8 @@ Not Helpful
 </div>
 
 
-<!-- =====================================================
-     DETAILS PANEL
-====================================================== -->
-
 <aside
     class="detail-panel"
-    id="detailPanel"
 >
 
 <div
@@ -2558,31 +2634,18 @@ Not Helpful
 
 <div>
 
-<div
-    style="
-        font-size:30px;
-        margin-bottom:12px;
-    "
->
+<div style="font-size:30px;">
 🔍
 </div>
 
-<strong
-    style="color:#dbeeff;"
->
+<strong>
 Select View Details
 </strong>
 
 <p>
-You will see:
-<br>
-What is it?
-<br>
-Why does it matter?
-<br>
-What was detected?
-<br>
-How do you fix it?
+See what the check means,
+why it matters, the evidence,
+and how to fix it.
 </p>
 
 </div>
@@ -2595,13 +2658,11 @@ How do you fix it?
     style="display:none;"
 >
 
-
 <div
     class="detail-title"
     id="detailName"
 >
 </div>
-
 
 <div
     class="detail-sub"
@@ -2609,18 +2670,15 @@ How do you fix it?
 >
 </div>
 
-
 <div class="detail-section">
 
 <strong>
 STATUS
 </strong>
 
-<div id="detailStatus">
-</div>
+<div id="detailStatus"></div>
 
 </div>
-
 
 <div class="detail-section">
 
@@ -2628,13 +2686,9 @@ STATUS
 WHY IT MATTERS
 </strong>
 
-<p
-    id="detailWhy"
->
-</p>
+<p id="detailWhy"></p>
 
 </div>
-
 
 <div class="detail-section">
 
@@ -2650,20 +2704,15 @@ EVIDENCE
 
 </div>
 
-
 <div class="detail-section">
 
 <strong>
 HOW TO FIX
 </strong>
 
-<p
-    id="detailFix"
->
-</p>
+<p id="detailFix"></p>
 
 </div>
-
 
 </div>
 
@@ -2676,16 +2725,11 @@ HOW TO FIX
 {% endif %}
 
 
-<!-- =====================================================
-     FOOTER
-====================================================== -->
-
 <footer class="footer">
 
 <div>
 Security Audit Console • Authorized testing only
 </div>
-
 
 <div class="author">
 
@@ -2716,17 +2760,12 @@ Security Enthusiast
 </main>
 
 
-<!-- =====================================================
-     CONTACT MODAL
-====================================================== -->
-
 <div
     class="modal"
     id="contactModal"
 >
 
 <div class="modal-box">
-
 
 <button
     class="modal-close"
@@ -2735,38 +2774,26 @@ Security Enthusiast
 ×
 </button>
 
-
 <img
     src="/static/ahmed.jpg"
     class="contact-photo"
     alt="Ahmed Sidhu"
-    onerror="
-        this.src='';
-        this.style.display='none';
-    "
+    onerror="this.style.display='none';"
 >
-
 
 <h2>
 Ahmed Sidhu
 </h2>
 
-
 <div class="contact-role">
 Security Enthusiast
 </div>
 
-
 <div class="contact-text">
-
 Have a question, suggestion, or feedback?
-
 <br>
-
 Feel free to get in touch.
-
 </div>
-
 
 <a
     href="mailto:sidhuahmed9886@gmail.com"
@@ -2775,11 +2802,9 @@ Feel free to get in touch.
 Contact via Email
 </a>
 
-
 <div class="email-address">
 sidhuahmed9886@gmail.com
 </div>
-
 
 </div>
 
@@ -2787,10 +2812,6 @@ sidhuahmed9886@gmail.com
 
 
 <script>
-
-/* =====================================================
-   PROGRESS ANIMATION
-====================================================== */
 
 function startScan(){
 
@@ -2819,11 +2840,6 @@ function startScan(){
             "progressStatus"
         );
 
-    const text =
-        document.getElementById(
-            "progressText"
-        );
-
     const feed =
         document.getElementById(
             "liveFeed"
@@ -2845,88 +2861,76 @@ function startScan(){
 
         [
             15,
-            "Connecting to target...",
+            "Connecting...",
             "[+] Connecting to target..."
         ],
 
         [
             30,
-            "Checking HTTPS / SSL...",
-            "[+] HTTPS / SSL check running..."
+            "Checking HTTPS...",
+            "[+] Checking HTTPS / SSL..."
         ],
 
         [
             45,
-            "Checking security headers...",
-            "[+] Testing security headers..."
+            "Checking headers...",
+            "[+] Checking security headers..."
         ],
 
         [
             60,
-            "Reviewing cookie security...",
-            "[+] Reviewing cookie attributes..."
+            "Reviewing cookies...",
+            "[+] Reviewing cookie security..."
         ],
 
         [
             75,
-            "Checking CORS policy...",
-            "[+] Checking CORS configuration..."
+            "Checking CORS...",
+            "[+] Checking CORS policy..."
         ],
 
         [
             90,
-            "Analyzing server information...",
-            "[+] Checking server disclosure..."
+            "Inspecting TLS and DNS...",
+            "[+] Inspecting TLS / DNS information..."
         ],
 
         [
             100,
-            "Finalizing assessment...",
-            "[+] Finalizing security assessment..."
+            "Assessment complete",
+            "[+] Scan completed successfully."
         ]
 
     ];
 
-    let index = 0;
+    let i = 0;
 
-    const interval =
-        setInterval(() => {
+    const interval = setInterval(() => {
 
-            const step =
-                steps[index];
+        const step = steps[i];
 
-            bar.style.width =
-                step[0] + "%";
+        bar.style.width =
+            step[0] + "%";
 
-            percent.innerText =
-                step[0] + "%";
+        percent.innerText =
+            step[0] + "%";
 
-            status.innerText =
-                step[1];
+        status.innerText =
+            step[1];
 
-            text.innerText =
-                step[1];
+        feed.innerHTML +=
+            "<br>" +
+            step[2];
 
-            feed.innerHTML +=
-                "<br>" +
-                step[2];
+        i++;
 
-            index++;
+        if(i >= steps.length){
+            clearInterval(interval);
+        }
 
-            if(index >= steps.length){
-
-                clearInterval(interval);
-
-            }
-
-        }, 420);
-
+    }, 400);
 }
 
-
-/* =====================================================
-   DETAILS
-====================================================== */
 
 function showDetails(item){
 
@@ -2938,69 +2942,49 @@ function showDetails(item){
         "detailContent"
     ).style.display = "block";
 
-
     document.getElementById(
         "detailName"
     ).innerText = item.name;
-
 
     document.getElementById(
         "detailDescription"
     ).innerText =
         item.description;
 
-
     document.getElementById(
         "detailWhy"
     ).innerText =
         item.why;
-
 
     document.getElementById(
         "detailEvidence"
     ).innerText =
         item.evidence;
 
-
     document.getElementById(
         "detailFix"
     ).innerText =
         item.fix;
-
 
     const status =
         document.getElementById(
             "detailStatus"
         );
 
-
     status.innerText =
         item.status +
         " • " +
         item.severity;
 
-
-    if(
-        item.status === "PASS" ||
-        item.status === "INFO"
-    ){
-
-        status.className =
-            "badge pass";
-
-    }else{
-
-        status.className =
-            "badge fail";
-
-    }
-
+    status.className =
+        (
+            item.status === "PASS" ||
+            item.status === "INFO"
+        )
+        ? "badge pass"
+        : "badge fail";
 }
 
-
-/* =====================================================
-   FILTERS
-====================================================== */
 
 let activeStatus = "ALL";
 
@@ -3010,9 +2994,7 @@ function filterStatus(
     button
 ){
 
-    activeStatus =
-        status;
-
+    activeStatus = status;
 
     document
         .querySelectorAll(".filter")
@@ -3023,21 +3005,17 @@ function filterStatus(
                 )
         );
 
-
     button.classList.add(
         "active"
     );
 
-
     applyFilters();
-
 }
 
 
 function filterFindings(){
 
     applyFilters();
-
 }
 
 
@@ -3051,11 +3029,8 @@ function applyFilters(){
         .value
         .toLowerCase();
 
-
     document
-        .querySelectorAll(
-            ".finding"
-        )
+        .querySelectorAll(".finding")
         .forEach(
             row => {
 
@@ -3068,36 +3043,27 @@ function applyFilters(){
                 const name =
                     row.dataset.name;
 
-
-                let statusMatch =
+                const statusMatch =
                     activeStatus === "ALL"
                     ||
                     activeStatus === status
                     ||
                     activeStatus === severity;
 
-
                 const searchMatch =
                     name.includes(
                         search
                     );
-
 
                 row.style.display =
                     statusMatch &&
                     searchMatch
                     ? "grid"
                     : "none";
-
             }
         );
-
 }
 
-
-/* =====================================================
-   COPY URL
-====================================================== */
 
 function copyCurrentURL(){
 
@@ -3117,13 +3083,8 @@ function copyCurrentURL(){
                     "Could not copy the URL."
                 )
         );
-
 }
 
-
-/* =====================================================
-   FEEDBACK
-====================================================== */
 
 function sendFeedback(type){
 
@@ -3132,10 +3093,8 @@ function sendFeedback(type){
             "feedbackText"
         );
 
-
     const message =
         input.value.trim();
-
 
     fetch(
         "/feedback",
@@ -3149,11 +3108,8 @@ function sendFeedback(type){
             },
 
             body:JSON.stringify({
-
                 type:type,
-
                 message:message
-
             })
 
         }
@@ -3185,13 +3141,8 @@ function sendFeedback(type){
 
         }
     );
-
 }
 
-
-/* =====================================================
-   CONTACT POPUP
-====================================================== */
 
 function openContact(){
 
@@ -3199,7 +3150,6 @@ function openContact(){
         "contactModal"
     ).style.display =
         "flex";
-
 }
 
 
@@ -3209,7 +3159,6 @@ function closeContact(){
         "contactModal"
     ).style.display =
         "none";
-
 }
 
 
@@ -3222,14 +3171,9 @@ window.addEventListener(
                 "contactModal"
             );
 
-        if(
-            event.target === modal
-        ){
-
+        if(event.target === modal){
             closeContact();
-
         }
-
     }
 );
 
@@ -3237,7 +3181,6 @@ window.addEventListener(
 
 
 </body>
-
 </html>
 """
 
@@ -3259,9 +3202,7 @@ REPORT_HTML = r"""
     content="width=device-width,initial-scale=1.0"
 >
 
-<title>
-Security Assessment Report
-</title>
+<title>Security Assessment Report</title>
 
 <style>
 
@@ -3332,22 +3273,12 @@ button{
     font-size:28px;
 }
 
-.muted{
-
-    color:#73869a;
-
-    font-size:11px;
-}
-
 .summary{
 
     display:grid;
 
     grid-template-columns:
-    2fr
-    1fr
-    1fr
-    1fr;
+    2fr 1fr 1fr 1fr;
 
     gap:11px;
 
@@ -3414,14 +3345,7 @@ button{
 
     justify-content:space-between;
 
-    gap:10px;
-
     margin-bottom:9px;
-}
-
-.finding-head strong{
-
-    font-size:14px;
 }
 
 .badge{
@@ -3506,54 +3430,17 @@ button{
     word-break:break-word;
 }
 
-@media(max-width:700px){
-
-    .report{
-
-        margin:10px;
-
-        padding:20px;
-    }
-
-    .summary{
-
-        grid-template-columns:1fr;
-    }
-
-}
-
-@media print{
-
-    button{
-        display:none;
-    }
-
-    body{
-        background:white;
-    }
-
-    .report{
-        margin:0;
-        max-width:none;
-        box-shadow:none;
-    }
-
-}
-
 </style>
 
 </head>
 
 <body>
 
-
 <div class="report">
-
 
 <button onclick="window.print()">
 Print / Save as PDF
 </button>
-
 
 <div class="header">
 
@@ -3561,7 +3448,7 @@ Print / Save as PDF
 Web Security Assessment Report
 </h1>
 
-<div class="muted">
+<div style="color:#73869a;font-size:11px;">
 Security Audit Console • Ahmed Sidhu
 </div>
 
@@ -3592,13 +3479,11 @@ Target
 <div class="box">
 
 <div class="label">
-Security Score
+Score
 </div>
 
 <div class="big">
-
 {{ results.score }}/100
-
 </div>
 
 </div>
@@ -3607,7 +3492,7 @@ Security Score
 <div class="box">
 
 <div class="label">
-Risk Level
+Risk
 </div>
 
 <div class="big
@@ -3655,13 +3540,11 @@ red
 
 <div class="finding">
 
-
 <div class="finding-head">
 
 <strong>
 {{ finding.name }}
 </strong>
-
 
 <span
     class="badge
@@ -3723,7 +3606,6 @@ HOW TO FIX
 
 </div>
 
-
 </div>
 
 {% endfor %}
@@ -3754,7 +3636,7 @@ Ahmed Sidhu • Security Enthusiast
 
 
 # =========================================================
-# ROUTES
+# MAIN ROUTE
 # =========================================================
 
 @app.route("/", methods=["GET", "POST"])
@@ -3794,6 +3676,10 @@ def index():
     )
 
 
+# =========================================================
+# REPORT
+# =========================================================
+
 @app.route("/report")
 def report():
 
@@ -3803,14 +3689,18 @@ def report():
     ).strip()
 
     if not target:
+
         return (
             "No target website was provided.",
             400
         )
 
-    results = audit_website(target)
+    results = audit_website(
+        target
+    )
 
     if "error" in results:
+
         return results["error"], 400
 
     return render_template_string(
@@ -3818,6 +3708,10 @@ def report():
         results=results,
     )
 
+
+# =========================================================
+# DOWNLOAD REPORT
+# =========================================================
 
 @app.route("/download-report")
 def download_report():
@@ -3828,14 +3722,18 @@ def download_report():
     ).strip()
 
     if not target:
+
         return (
             "No target website was provided.",
             400
         )
 
-    results = audit_website(target)
+    results = audit_website(
+        target
+    )
 
     if "error" in results:
+
         return results["error"], 400
 
     html = render_template_string(
@@ -3843,7 +3741,9 @@ def download_report():
         results=results,
     )
 
-    response = make_response(html)
+    response = make_response(
+        html
+    )
 
     response.headers[
         "Content-Disposition"
@@ -3854,10 +3754,16 @@ def download_report():
 
     response.headers[
         "Content-Type"
-    ] = "text/html; charset=utf-8"
+    ] = (
+        "text/html; charset=utf-8"
+    )
 
     return response
 
+
+# =========================================================
+# FEEDBACK
+# =========================================================
 
 @app.route(
     "/feedback",
@@ -3872,12 +3778,12 @@ def feedback():
         or {}
     )
 
-    feedback = load_json(
+    feedback_data = load_json(
         FEEDBACK_FILE,
         []
     )
 
-    feedback.insert(
+    feedback_data.insert(
         0,
         {
             "type": data.get(
@@ -3896,28 +3802,106 @@ def feedback():
 
     save_json(
         FEEDBACK_FILE,
-        feedback[:100]
+        feedback_data[:100]
     )
 
-    return jsonify(
-        {
-            "success": True,
-            "message": (
-                "Thanks! Your feedback was saved."
-            ),
-        }
-    )
+    return jsonify({
+        "success": True,
+        "message": (
+            "Thanks! Your feedback was saved."
+        ),
+    })
 
+
+# =========================================================
+# HISTORY
+# =========================================================
 
 @app.route("/history")
 def history():
 
-    return jsonify(
-        load_json(
-            HISTORY_FILE,
-            []
-        )
+    history_data = load_json(
+        HISTORY_FILE,
+        []
     )
+
+    return jsonify({
+        "success": True,
+        "count": len(history_data),
+        "scans": history_data
+    })
+
+
+# =========================================================
+# COMPARE SCANS
+# =========================================================
+
+@app.route("/compare")
+def compare_scans():
+
+    first_id = request.args.get(
+        "first",
+        ""
+    ).strip()
+
+    second_id = request.args.get(
+        "second",
+        ""
+    ).strip()
+
+    if not first_id or not second_id:
+
+        return jsonify({
+            "success": False,
+            "error": (
+                "Two scan IDs are required."
+            )
+        }), 400
+
+    history_data = load_json(
+        HISTORY_FILE,
+        []
+    )
+
+    first_scan = next(
+        (
+            scan
+            for scan in history_data
+            if scan.get("id") == first_id
+        ),
+        None
+    )
+
+    second_scan = next(
+        (
+            scan
+            for scan in history_data
+            if scan.get("id") == second_id
+        ),
+        None
+    )
+
+    if not first_scan or not second_scan:
+
+        return jsonify({
+            "success": False,
+            "error": (
+                "One or both scans were not found."
+            )
+        }), 404
+
+    score_change = (
+        second_scan.get("score", 0)
+        -
+        first_scan.get("score", 0)
+    )
+
+    return jsonify({
+        "success": True,
+        "first": first_scan,
+        "second": second_scan,
+        "score_change": score_change,
+    })
 
 
 # =========================================================
