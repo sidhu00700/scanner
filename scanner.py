@@ -626,7 +626,7 @@ SCAN • ANALYZE • PROTECT
 <input
 type="text"
 name="username"
-placeholder="ahmedsidhu"
+placeholder="youname"
 required
 autocomplete="username"
 >
